@@ -2,7 +2,130 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --cream: #fbf2ee;
+  --blush: #f4e3da;
+  --peach: #f2bca8;
+  --peach-soft: #f0d6cb;
+  --line: #ecccbf;
+  --cocoa: #3d2820;
+  --cocoa-soft: #9a7565;
+  --coral: #e89483;
+  --coral-deep: #d97e6c;
+  --ember: #c66b5f;
+  --scrollbar: rgba(154, 117, 101, 0.35);
+}
+
+.dark {
+  --cream: #1c1714;
+  --blush: #271f1c;
+  --peach: #c97262;
+  --peach-soft: #322521;
+  --line: #3a2a25;
+  --cocoa: #f0d9cf;
+  --cocoa-soft: #a98a7c;
+  --coral: #e89483;
+  --coral-deep: #f0a596;
+  --ember: #e07b6f;
+  --scrollbar: rgba(169, 138, 124, 0.35);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: 'Nunito', system-ui, -apple-system, sans-serif;
+  background: var(--cream);
+  color: var(--cocoa);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'kern' 1, 'liga' 1;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* MDEditor warm-tinted overrides */
+.w-md-editor {
+  background: var(--blush) !important;
+  color: var(--cocoa) !important;
+  box-shadow: none !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 1rem !important;
+  overflow: hidden;
+}
+.w-md-editor-toolbar {
+  background: var(--blush) !important;
+  border-bottom: 1px solid var(--line) !important;
+}
+.w-md-editor-toolbar ul > li > button {
+  color: var(--cocoa) !important;
+}
+.w-md-editor-toolbar ul > li > button:hover {
+  background: var(--peach-soft) !important;
+  color: var(--coral-deep) !important;
+}
+.w-md-editor-toolbar-divider {
+  background: var(--line) !important;
+}
+.w-md-editor-text,
+.w-md-editor-text-input,
+.w-md-editor-text-pre,
+.w-md-editor textarea {
+  background: var(--cream) !important;
+  color: var(--cocoa) !important;
+  caret-color: var(--coral) !important;
+}
+.w-md-editor-preview {
+  background: var(--cream) !important;
+  color: var(--cocoa) !important;
+  box-shadow: inset 1px 0 0 var(--line) !important;
+}
+.wmde-markdown {
+  background: transparent !important;
+  color: var(--cocoa) !important;
+  font-family: 'Nunito', system-ui, sans-serif !important;
+}
+.wmde-markdown a {
+  color: var(--coral-deep) !important;
+}
+.wmde-markdown code {
+  background: var(--peach-soft) !important;
+  color: var(--cocoa) !important;
+}
+.wmde-markdown blockquote {
+  border-left: 3px solid var(--coral) !important;
+  background: var(--peach-soft) !important;
+  color: var(--cocoa) !important;
+}
+.wmde-markdown hr {
+  background: var(--line) !important;
+}
+
+/* Selection */
+::selection {
+  background: var(--peach);
+  color: var(--cocoa);
+}
+
+/* Focus ring uniform */
+*:focus-visible {
+  outline: 2px solid var(--coral);
+  outline-offset: 2px;
+  border-radius: 6px;
 }

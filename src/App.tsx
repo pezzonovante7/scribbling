@@ -1,132 +1,439 @@
-import { useState, useEffect } from 'react';
-import MDEditor from '@uiw/react-md-editor';
-import { Search, Download, Lock, Trash2, Moon, Sun } from 'lucide-react';
-import Dexie from 'dexie';
-import { useLiveQuery } from 'dexie-react-hooks';
-import Fuse from 'fuse.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Sparkles } from 'lucide-react';
+import { Sidebar } from './Sidebar';
+import { Editor } from './Editor';
+import { LockScreen } from './Lock';
+import {
+  dbPro,
+  dbVault,
+  type DecryptedNote,
+  type ProNote,
+  type VaultNote,
+  type Workspace,
+} from './db';
+import { encryptString, decryptString } from './crypto';
 
-const dbProfessional = new Dexie('ScribblingProfessional');
-dbProfessional.version(1).stores({ notes: '++id,title,content,tags,updatedAt' });
+const LS_THEME = 'scribbling.theme';
+const LS_WORKSPACE = 'scribbling.workspace';
+const LS_SELECTED_PRO = 'scribbling.selected.pro';
+const LS_SELECTED_PERSONAL = 'scribbling.selected.personal';
 
-const dbPersonal = new Dexie('ScribblingPersonal');
-dbPersonal.version(1).stores({ notes: '++id,title,content,tags,updatedAt' });
+function readStoredWorkspace(): Workspace {
+  const v = localStorage.getItem(LS_WORKSPACE);
+  return v === 'personal' ? 'personal' : 'professional';
+}
 
-function App() {
-  const [workspace, setWorkspace] = useState<'professional' | 'personal'>('professional');
-  const [selectedNote, setSelectedNote] = useState<any>(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [isDark, setIsDark] = useState(false);
-  const db = workspace === 'professional' ? dbProfessional : dbPersonal;
+function readStoredDark(): boolean {
+  const v = localStorage.getItem(LS_THEME);
+  if (v === 'dark') return true;
+  if (v === 'light') return false;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
 
-  const liveNotes = useLiveQuery(() => db.table('notes').orderBy('updatedAt').reverse().toArray(), [db]);
-
-  const fuse = new Fuse(liveNotes || [], {
-    keys: ['title', 'content'],
-    threshold: 0.3,
+export default function App() {
+  const [workspace, setWorkspaceState] = useState<Workspace>(readStoredWorkspace);
+  const [isDark, setIsDark] = useState<boolean>(readStoredDark);
+  const [vaultKey, setVaultKey] = useState<CryptoKey | null>(null);
+  const [selectedPro, setSelectedPro] = useState<number | null>(() => {
+    const v = localStorage.getItem(LS_SELECTED_PRO);
+    return v ? Number(v) : null;
   });
-  const filteredNotes = searchTerm ? fuse.search(searchTerm).map(r => r.item) : (liveNotes || []);
+  const [selectedPersonal, setSelectedPersonal] = useState<number | null>(() => {
+    const v = localStorage.getItem(LS_SELECTED_PERSONAL);
+    return v ? Number(v) : null;
+  });
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
-  const createNote = async () => {
-    const id = await db.table('notes').add({
-      title: 'Untitled Note',
-      content: '',
-      tags: [],
-      updatedAt: new Date()
-    });
-    const newNote = await db.table('notes').get(id);
-    setSelectedNote(newNote);
-  };
+  // Persist theme
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDark);
+    document.documentElement.dataset.colorMode = isDark ? 'dark' : 'light';
+    localStorage.setItem(LS_THEME, isDark ? 'dark' : 'light');
+  }, [isDark]);
 
-  const updateNote = async (field: string, value: any) => {
-    if (!selectedNote) return;
-    await db.table('notes').update(selectedNote.id, {
-      [field]: value,
-      updatedAt: new Date()
-    });
-    setSelectedNote({ ...selectedNote, [field]: value, updatedAt: new Date() });
-  };
+  // Persist workspace selection
+  const setWorkspace = useCallback((w: Workspace) => {
+    setWorkspaceState(w);
+    localStorage.setItem(LS_WORKSPACE, w);
+  }, []);
 
-  const deleteNote = async (id: number) => {
-    if (confirm('Delete this note permanently?')) {
-      await db.table('notes').delete(id);
-      setSelectedNote(null);
+  // Bumped after every mutation to force list refresh
+  const [proTick, setProTick] = useState(0);
+  const [vaultTick, setVaultTick] = useState(0);
+  const refreshPro = useCallback(() => setProTick((t) => t + 1), []);
+  const refreshVault = useCallback(() => setVaultTick((t) => t + 1), []);
+
+  const [proRows, setProRows] = useState<ProNote[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await dbPro.open();
+        const rows = await dbPro.notes.toArray();
+        if (!cancelled) setProRows(rows);
+      } catch {
+        if (!cancelled) setProRows([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [proTick]);
+
+  const [vaultRows, setVaultRows] = useState<VaultNote[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await dbVault.open();
+        const rows = await dbVault.notes.toArray();
+        if (!cancelled) setVaultRows(rows);
+      } catch {
+        if (!cancelled) setVaultRows([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vaultTick]);
+
+  // Decrypted personal notes (cached by id+updatedAt)
+  const [personalNotes, setPersonalNotes] = useState<DecryptedNote[]>([]);
+  const decryptCacheRef = useRef<Map<number, { stamp: number; note: DecryptedNote }>>(
+    new Map()
+  );
+
+  useEffect(() => {
+    if (workspace !== 'personal' || !vaultKey) return;
+    let cancelled = false;
+    (async () => {
+      const cache = decryptCacheRef.current;
+      const out: DecryptedNote[] = [];
+      for (const row of vaultRows) {
+        if (row.id === undefined) continue;
+        if (!row.data) continue; // legacy un-encrypted (shouldn't happen after first unlock)
+        const stamp = row.updatedAt.getTime();
+        const cached = cache.get(row.id);
+        if (cached && cached.stamp === stamp) {
+          out.push(cached.note);
+          continue;
+        }
+        try {
+          const json = await decryptString(vaultKey, row.data);
+          const parsed = JSON.parse(json) as {
+            title: string;
+            content: string;
+            tags: string[];
+          };
+          const note: DecryptedNote = {
+            id: row.id,
+            title: parsed.title ?? '',
+            content: parsed.content ?? '',
+            tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+            pinned: row.pinned ?? false,
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+          };
+          cache.set(row.id, { stamp, note });
+          out.push(note);
+        } catch {
+          // skip undecryptable rows
+        }
+      }
+      if (!cancelled) setPersonalNotes(out);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vaultRows, vaultKey, workspace]);
+
+  // When vault locks, drop cache and clear selection
+  const lockVault = useCallback(() => {
+    setVaultKey(null);
+    decryptCacheRef.current.clear();
+    setPersonalNotes([]);
+    setSelectedPersonal(null);
+  }, []);
+
+  // Pro notes as DecryptedNote-shape (no decryption needed)
+  const proNotes: DecryptedNote[] = useMemo(
+    () =>
+      proRows
+        .filter((n): n is ProNote & { id: number } => n.id !== undefined)
+        .map((n) => ({
+          id: n.id,
+          title: n.title ?? '',
+          content: n.content ?? '',
+          tags: Array.isArray(n.tags) ? n.tags : [],
+          pinned: n.pinned ?? false,
+          createdAt: n.createdAt ?? n.updatedAt ?? new Date(),
+          updatedAt: n.updatedAt ?? new Date(),
+        })),
+    [proRows]
+  );
+
+  const notes = workspace === 'professional' ? proNotes : personalNotes;
+  const selectedId =
+    workspace === 'professional' ? selectedPro : selectedPersonal;
+  const setSelectedId = (id: number | null) => {
+    if (workspace === 'professional') {
+      setSelectedPro(id);
+      if (id !== null) localStorage.setItem(LS_SELECTED_PRO, String(id));
+      else localStorage.removeItem(LS_SELECTED_PRO);
+    } else {
+      setSelectedPersonal(id);
+      if (id !== null) localStorage.setItem(LS_SELECTED_PERSONAL, String(id));
+      else localStorage.removeItem(LS_SELECTED_PERSONAL);
     }
   };
 
-  const exportProfessional = async () => {
-    if (workspace !== 'professional') return;
-    const allNotes = await db.table('notes').toArray();
-    const blob = new Blob([JSON.stringify(allNotes, null, 2)], { type: 'application/json' });
+  const selectedNote = useMemo(
+    () => notes.find((n) => n.id === selectedId) ?? null,
+    [notes, selectedId]
+  );
+
+  // ----- Actions -----
+
+  const createNote = useCallback(async () => {
+    const now = new Date();
+    if (workspace === 'professional') {
+      const id = await dbPro.notes.add({
+        title: '',
+        content: '',
+        tags: [],
+        pinned: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      setSelectedPro(id as number);
+      localStorage.setItem(LS_SELECTED_PRO, String(id));
+      refreshPro();
+    } else {
+      if (!vaultKey) return;
+      const data = await encryptString(
+        vaultKey,
+        JSON.stringify({ title: '', content: '', tags: [] })
+      );
+      const id = await dbVault.notes.add({
+        data,
+        pinned: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      setSelectedPersonal(id as number);
+      localStorage.setItem(LS_SELECTED_PERSONAL, String(id));
+      refreshVault();
+    }
+  }, [workspace, vaultKey, refreshPro, refreshVault]);
+
+  const updateNote = useCallback(
+    async (id: number, patch: Partial<DecryptedNote>) => {
+      const now = new Date();
+      if (workspace === 'professional') {
+        const existing = await dbPro.notes.get(id);
+        if (!existing) return;
+        await dbPro.notes.update(id, {
+          ...('title' in patch ? { title: patch.title } : {}),
+          ...('content' in patch ? { content: patch.content } : {}),
+          ...('tags' in patch ? { tags: patch.tags } : {}),
+          ...('pinned' in patch ? { pinned: patch.pinned } : {}),
+          updatedAt: now,
+        });
+        refreshPro();
+      } else {
+        if (!vaultKey) return;
+        const current = personalNotes.find((n) => n.id === id);
+        if (!current) return;
+        const next = {
+          title: patch.title ?? current.title,
+          content: patch.content ?? current.content,
+          tags: patch.tags ?? current.tags,
+        };
+        const data = await encryptString(vaultKey, JSON.stringify(next));
+        await dbVault.notes.update(id, {
+          data,
+          ...('pinned' in patch ? { pinned: patch.pinned } : {}),
+          updatedAt: now,
+        });
+        refreshVault();
+      }
+    },
+    [workspace, vaultKey, personalNotes, refreshPro, refreshVault]
+  );
+
+  const deleteNote = useCallback(
+    async (id: number) => {
+      if (workspace === 'professional') {
+        await dbPro.notes.delete(id);
+        if (selectedPro === id) {
+          setSelectedPro(null);
+          localStorage.removeItem(LS_SELECTED_PRO);
+        }
+        refreshPro();
+      } else {
+        await dbVault.notes.delete(id);
+        decryptCacheRef.current.delete(id);
+        if (selectedPersonal === id) {
+          setSelectedPersonal(null);
+          localStorage.removeItem(LS_SELECTED_PERSONAL);
+        }
+        refreshVault();
+      }
+    },
+    [workspace, selectedPro, selectedPersonal, refreshPro, refreshVault]
+  );
+
+  const exportWorkspace = useCallback(() => {
+    const payload = {
+      workspace,
+      exportedAt: new Date().toISOString(),
+      notes: notes.map(({ id, ...rest }) => ({ id, ...rest })),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'scribbling-professional-export.json';
+    a.download = `scribbling-${workspace}-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
-  };
+    URL.revokeObjectURL(url);
+  }, [workspace, notes]);
 
+  const importWorkspace = useCallback(
+    async (file: File) => {
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text) as {
+          notes?: Array<{
+            title?: string;
+            content?: string;
+            tags?: string[];
+            pinned?: boolean;
+            createdAt?: string;
+            updatedAt?: string;
+          }>;
+        };
+        if (!Array.isArray(parsed.notes)) return;
+        const now = new Date();
+        for (const raw of parsed.notes) {
+          const item = {
+            title: raw.title ?? '',
+            content: raw.content ?? '',
+            tags: Array.isArray(raw.tags) ? raw.tags : [],
+            pinned: raw.pinned ?? false,
+            createdAt: raw.createdAt ? new Date(raw.createdAt) : now,
+            updatedAt: raw.updatedAt ? new Date(raw.updatedAt) : now,
+          };
+          if (workspace === 'professional') {
+            await dbPro.notes.add(item);
+          } else {
+            if (!vaultKey) return;
+            const data = await encryptString(
+              vaultKey,
+              JSON.stringify({
+                title: item.title,
+                content: item.content,
+                tags: item.tags,
+              })
+            );
+            await dbVault.notes.add({
+              data,
+              pinned: item.pinned,
+              createdAt: item.createdAt,
+              updatedAt: item.updatedAt,
+            });
+          }
+        }
+        if (workspace === 'professional') refreshPro();
+        else refreshVault();
+      } catch {
+        // ignore parse failures
+      }
+    },
+    [workspace, vaultKey, refreshPro, refreshVault]
+  );
+
+  // ----- Keyboard shortcuts -----
   useEffect(() => {
-    if (isDark) document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  }, [isDark]);
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.ctrlKey || e.metaKey;
+      if (meta && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (meta && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        if (workspace === 'personal' && !vaultKey) return;
+        createNote();
+      } else if (e.key === 'Escape') {
+        const el = searchRef.current;
+        if (el && document.activeElement === el) el.blur();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [createNote, vaultKey, workspace]);
+
+  // ----- Render -----
+
+  const showLockScreen = workspace === 'personal' && !vaultKey;
 
   return (
-    <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
-      {/* Sidebar */}
-      <div className="w-72 border-r border-gray-200 dark:border-gray-800 flex flex-col">
-        <div className="p-4 border-b flex items-center justify-between">
-          <h1 className="text-2xl font-semibold tracking-tight">Scribbling</h1>
-          <div className="flex items-center gap-2">
-            <button onClick={() => setWorkspace('professional')} className={`px-4 py-1 text-sm rounded-xl ${workspace === 'professional' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700'}`}>Professional</button>
-            <button onClick={() => setWorkspace('personal')} className={`px-4 py-1 text-sm rounded-xl flex items-center gap-1 ${workspace === 'personal' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700'}`}><Lock className="w-4 h-4" /> Personal</button>
-            <button onClick={() => setIsDark(!isDark)} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl">{isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}</button>
-          </div>
-        </div>
-
-        <div className="p-4">
-          <button onClick={createNote} className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-2xl flex items-center justify-center gap-2 font-medium">+ New Note</button>
-        </div>
-
-        <div className="px-4 pb-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
-            <input type="text" placeholder="Search notes..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full pl-10 py-3 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-2xl focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-auto px-2">
-          {filteredNotes.map((note: any) => (
-            <div key={note.id} onClick={() => setSelectedNote(note)} className={`mx-2 px-4 py-3 rounded-2xl cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 mb-1 ${selectedNote?.id === note.id ? 'bg-blue-50 dark:bg-blue-950' : ''}`}>
-              <div className="font-medium line-clamp-1">{note.title}</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">{new Date(note.updatedAt).toLocaleDateString()}</div>
-            </div>
-          ))}
-        </div>
-
-        {workspace === 'professional' && (
-          <div className="p-4 border-t">
-            <button onClick={exportProfessional} className="w-full flex items-center justify-center gap-2 text-blue-600 hover:text-blue-700 py-2 text-sm font-medium"><Download className="w-4 h-4" /> Export Professional Notes</button>
-          </div>
-        )}
-      </div>
-
-      {/* Editor */}
-      <div className="flex-1 flex flex-col">
-        {selectedNote ? (
-          <>
-            <div className="px-6 py-4 border-b flex items-center gap-4">
-              <input type="text" value={selectedNote.title} onChange={(e) => updateNote('title', e.target.value)} className="flex-1 text-2xl font-semibold bg-transparent focus:outline-none" placeholder="Note title..." />
-              <button onClick={() => deleteNote(selectedNote.id)} className="flex items-center gap-2 text-red-500 hover:text-red-600 px-4 py-2 rounded-xl hover:bg-red-50 dark:hover:bg-red-950"><Trash2 className="w-5 h-5" /> Delete</button>
-            </div>
-            <div className="flex-1 p-6 overflow-auto">
-              <MDEditor value={selectedNote.content} onChange={(val) => updateNote('content', val || '')} height="100%" preview="live" />
-            </div>
-          </>
+    <div className="flex h-screen bg-cream text-cocoa">
+      <Sidebar
+        workspace={workspace}
+        setWorkspace={setWorkspace}
+        notes={notes}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        onCreate={createNote}
+        onExport={exportWorkspace}
+        onImport={importWorkspace}
+        onLockVault={workspace === 'personal' && vaultKey ? lockVault : undefined}
+        isDark={isDark}
+        toggleDark={() => setIsDark((d) => !d)}
+        searchRef={searchRef}
+      />
+      <main className="flex-1 flex flex-col min-w-0">
+        {showLockScreen ? (
+          <LockScreen onUnlock={(k) => setVaultKey(k)} />
+        ) : selectedNote ? (
+          <Editor
+            note={selectedNote}
+            isDark={isDark}
+            onChange={(patch) => updateNote(selectedNote.id, patch)}
+            onDelete={() => deleteNote(selectedNote.id)}
+          />
         ) : (
-          <div className="flex-1 flex items-center justify-center text-gray-400 dark:text-gray-500 text-lg">Select a note or click “+ New Note” to begin writing</div>
+          <EmptyState onCreate={createNote} />
         )}
-      </div>
+      </main>
     </div>
   );
 }
 
-export default App;
+function EmptyState({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="flex-1 flex items-center justify-center p-8">
+      <div className="text-center max-w-md">
+        <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-peach-soft mb-6">
+          <Sparkles className="w-10 h-10 text-coral" />
+        </div>
+        <h2 className="text-3xl font-bold text-cocoa mb-2">A quiet place to think</h2>
+        <p className="text-cocoa-soft mb-6 leading-relaxed">
+          Pick a note from the sidebar, or start something new. Press{' '}
+          <kbd className="border border-line rounded px-1.5 py-0.5 text-xs">⌘N</kbd> to
+          begin and{' '}
+          <kbd className="border border-line rounded px-1.5 py-0.5 text-xs">⌘K</kbd> to
+          search.
+        </p>
+        <button
+          onClick={onCreate}
+          className="px-6 py-3 rounded-2xl bg-coral hover:bg-coral-deep text-white font-semibold shadow-glow transition"
+        >
+          Start a new note
+        </button>
+      </div>
+    </div>
+  );
+}
