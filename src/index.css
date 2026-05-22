@@ -60,8 +60,27 @@ body {
   background: transparent;
 }
 
-/* MDEditor warm-tinted overrides */
+/* MDEditor — set the library's CSS variables so editor + preview pick them up */
 .w-md-editor {
+  --color-canvas-default: var(--cream);
+  --color-canvas-subtle: var(--blush);
+  --color-fg-default: var(--cocoa);
+  --color-fg-muted: var(--cocoa-soft);
+  --color-fg-subtle: var(--cocoa-soft);
+  --color-border-default: var(--line);
+  --color-border-muted: var(--line);
+  --color-accent-fg: var(--coral-deep);
+  --color-accent-emphasis: var(--coral);
+  --color-neutral-muted: var(--peach-soft);
+  --color-prettylights-syntax-comment: var(--cocoa-soft);
+  --color-prettylights-syntax-markup-heading: var(--coral-deep);
+  --color-prettylights-syntax-markup-bold: var(--cocoa);
+  --color-prettylights-syntax-markup-italic: var(--cocoa);
+  --color-prettylights-syntax-storage-modifier-import: var(--cocoa);
+  --color-prettylights-syntax-constant: var(--coral);
+  --color-prettylights-syntax-entity: var(--coral-deep);
+  --color-prettylights-syntax-string: var(--ember);
+  --color-prettylights-syntax-keyword: var(--coral-deep);
   background: var(--blush) !important;
   color: var(--cocoa) !important;
   box-shadow: none !important;
@@ -69,6 +88,7 @@ body {
   border-radius: 1rem !important;
   overflow: hidden;
 }
+
 .w-md-editor-toolbar {
   background: var(--blush) !important;
   border-bottom: 1px solid var(--line) !important;
@@ -83,14 +103,31 @@ body {
 .w-md-editor-toolbar-divider {
   background: var(--line) !important;
 }
+
+/* Editor pane (left): force the visible text to cocoa, including all token spans */
 .w-md-editor-text,
-.w-md-editor-text-input,
-.w-md-editor-text-pre,
-.w-md-editor textarea {
+.w-md-editor-input,
+.w-md-editor-text-input {
   background: var(--cream) !important;
-  color: var(--cocoa) !important;
   caret-color: var(--coral) !important;
 }
+.w-md-editor-text-pre,
+.w-md-editor-text-pre > code,
+.w-md-editor-text-pre > code > span,
+.w-md-editor-text-pre code .token:not(.title):not(.url):not(.content):not(.code-block):not(.strike):not(.keyword) {
+  color: var(--cocoa) !important;
+}
+.w-md-editor-text-pre .token.title,
+.w-md-editor-text-pre .token.title.important {
+  color: var(--coral-deep) !important;
+  font-weight: 700 !important;
+}
+.w-md-editor-text-pre .token.url,
+.w-md-editor-text-pre .token.content {
+  color: var(--coral) !important;
+}
+
+/* Preview pane (right) */
 .w-md-editor-preview {
   background: var(--cream) !important;
   color: var(--cocoa) !important;
@@ -115,6 +152,13 @@ body {
 }
 .wmde-markdown hr {
   background: var(--line) !important;
+}
+.wmde-markdown h1,
+.wmde-markdown h2,
+.wmde-markdown h3,
+.wmde-markdown h4 {
+  border-bottom-color: var(--line) !important;
+  color: var(--cocoa) !important;
 }
 
 /* Selection */
